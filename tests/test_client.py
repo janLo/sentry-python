@@ -18,6 +18,7 @@ from sentry_sdk import (
 )
 from sentry_sdk.transport import Transport
 from sentry_sdk._compat import reraise, text_type
+from sentry_sdk.utils import HAS_CHAINED_EXCEPTIONS
 
 
 class EventCaptured(Exception):
@@ -305,3 +306,73 @@ def test_nan(sentry_init, capture_events):
     frames = event["exception"]["values"][0]["stacktrace"]["frames"]
     frame, = frames
     assert frame["vars"]["nan"] == "nan"
+
+
+def test_cyclic_frame_vars(sentry_init, capture_events):
+    sentry_init()
+    events = capture_events()
+
+    try:
+        a = {}
+        a["a"] = a
+        1 / 0
+    except Exception:
+        capture_exception()
+
+    event, = events
+    assert event["exception"]["values"][0]["stacktrace"]["frames"][0]["vars"]["a"] == {
+        "a": "<cyclic>"
+    }
+
+
+def test_cyclic_data(sentry_init, capture_events):
+    sentry_init()
+    events = capture_events()
+
+    with configure_scope() as scope:
+        data = {}
+        data["is_cyclic"] = data
+
+        other_data = ""
+        data["not_cyclic"] = other_data
+        data["not_cyclic2"] = other_data
+        scope.set_extra("foo", data)
+
+    capture_message("hi")
+    event, = events
+
+    data = event["extra"]["foo"]
+    assert data == {"not_cyclic2": "", "not_cyclic": "", "is_cyclic": "<cyclic>"}
+
+
+def test_databag_stripping(sentry_init, capture_events):
+    sentry_init()
+    events = capture_events()
+
+    try:
+        a = "A" * 16000  # noqa
+        1 / 0
+    except Exception:
+        capture_exception()
+
+    event, = events
+
+    assert len(json.dumps(event)) < 10000
+
+
+@pytest.mark.skipif(not HAS_CHAINED_EXCEPTIONS, reason="Only works on 3.3+")
+def test_chained_exceptions(sentry_init, capture_events):
+    sentry_init()
+    events = capture_events()
+
+    try:
+        try:
+            1 / 0
+        except Exception:
+            1 / 0
+    except Exception:
+        capture_exception()
+
+    event, = events
+
+    assert len(event["exception"]["values"]) == 2

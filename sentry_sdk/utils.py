@@ -31,6 +31,8 @@ epoch = datetime(1970, 1, 1)
 # The logger is created here but initialized in the debug support module
 logger = logging.getLogger("sentry_sdk.errors")
 
+CYCLE_MARKER = object()
+
 
 def _get_debug_hub():
     # This function is replaced by debug.py
@@ -308,13 +310,19 @@ def safe_repr(value):
 def object_to_json(obj):
     def _walk(obj, depth):
         if depth < 4:
-            if isinstance(obj, Sequence) and not isinstance(obj, (bytes, text_type)):
+            if isinstance(obj, (list, tuple)):
+                # It is not safe to iterate over another sequence types as this may raise errors or
+                # bring undesired side-effects (e.g. Django querysets are executed during iteration)
                 return [_walk(x, depth + 1) for x in obj]
             if isinstance(obj, Mapping):
                 return {safe_str(k): _walk(v, depth + 1) for k, v in obj.items()}
+
+        if obj is CYCLE_MARKER:
+            return obj
+
         return safe_repr(obj)
 
-    return _walk(obj, 0)
+    return _walk(break_cycles(obj), 0)
 
 
 def extract_locals(frame):
@@ -427,18 +435,40 @@ def single_exception_from_error_tuple(
     }
 
 
-def walk_exception_chain(exc_info):
-    exc_type, exc_value, tb = exc_info
+HAS_CHAINED_EXCEPTIONS = hasattr(Exception, "__suppress_context__")
 
-    while exc_type is not None:
-        yield exc_type, exc_value, tb
+if HAS_CHAINED_EXCEPTIONS:
 
-        cause = getattr(exc_value, "__cause__", None)
-        if cause is None:
-            break
-        exc_type = type(cause)
-        exc_value = cause
-        tb = getattr(cause, "__traceback__", None)
+    def walk_exception_chain(exc_info):
+        exc_type, exc_value, tb = exc_info
+
+        seen_exceptions = []
+        seen_exception_ids = set()
+
+        while exc_type is not None and id(exc_value) not in seen_exception_ids:
+            yield exc_type, exc_value, tb
+
+            # Avoid hashing random types we don't know anything
+            # about. Use the list to keep a ref so that the `id` is
+            # not used for another object.
+            seen_exceptions.append(exc_value)
+            seen_exception_ids.add(id(exc_value))
+
+            if exc_value.__suppress_context__:
+                cause = exc_value.__cause__
+            else:
+                cause = exc_value.__context__
+            if cause is None:
+                break
+            exc_type = type(cause)
+            exc_value = cause
+            tb = getattr(cause, "__traceback__", None)
+
+
+else:
+
+    def walk_exception_chain(exc_info):
+        yield exc_info
 
 
 def exceptions_from_error_tuple(exc_info, client_options=None, mechanism=None):
@@ -615,7 +645,28 @@ def strip_frame_mut(frame):
         frame["vars"] = strip_databag(frame["vars"])
 
 
+def break_cycles(obj, memo=None):
+    if memo is None:
+        memo = {}
+    if id(obj) in memo:
+        return CYCLE_MARKER
+    memo[id(obj)] = obj
+
+    try:
+        if isinstance(obj, Mapping):
+            return {k: break_cycles(v, memo) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            # It is not safe to iterate over another sequence types as this may raise errors or
+            # bring undesired side-effects (e.g. Django querysets are executed during iteration)
+            return [break_cycles(v, memo) for v in obj]
+        return obj
+    finally:
+        del memo[id(obj)]
+
+
 def convert_types(obj):
+    if obj is CYCLE_MARKER:
+        return u"<cyclic>"
     if isinstance(obj, datetime):
         return obj.strftime("%Y-%m-%dT%H:%M:%SZ")
     if isinstance(obj, Mapping):

@@ -1,3 +1,21 @@
+## 0.6.9
+
+* Second attempt at fixing the bug that was supposed to be fixed in 0.6.8.
+
+  > No longer access arbitrary sequences in local vars due to possible side effects.
+
+## 0.6.8
+
+* No longer access arbitrary sequences in local vars due to possible side effects.
+
+## 0.6.7
+
+* Sourcecode Django templates is now displayed in stackframes like Jinja templates in Flask already were.
+* Updates to AWS Lambda integration for changes Amazon did to their Python 3.7 runtime.
+* Fix a bug in the AIOHTTP integration that would report 300s and other HTTP status codes as errors.
+* Fix a bug where a crashing `before_send` would crash the SDK and app.
+* Fix a bug where cyclic references in e.g. local variables or `extra` data would crash the SDK.
+
 ## 0.6.6
 
 * Un-break API of internal `Auth` object that we use in Sentry itself.
